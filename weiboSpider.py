@@ -8,17 +8,20 @@ import re
 import sys
 import traceback
 from collections import OrderedDict
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta
 from time import sleep
 
 import requests
 from selenium import webdriver
 from lxml import etree
-from requests.adapters import HTTPAdapter
 from tqdm import tqdm
+from threading import Thread
 
+done_id_path = './ids.t'
+
+init_id = '2360812967'
 get_all = 0
-since_date = '2009-08-14'
+since_date = '2019-06-14'
 mongodb_write = 0
 mysql_write = 0
 pic_download = 0
@@ -30,6 +33,8 @@ browser = webdriver.Firefox(options=options, executable_path='./geckodriver')
 
 ids = []
 undo_ids = []
+
+save_path = os.path.abspath('.')
 
 
 def is_date(since_date):
@@ -147,6 +152,13 @@ def get_user_list(file_name):
     return user_id_list
 
 
+def get_history_ids():
+    file = open(done_id_path, 'r')
+    for line in file:
+        ids.append(line)
+    file.close()
+
+
 class Weibo(object):
     def __init__(self, user_id):
         self.weibo = []  # 存储爬取到的所有微博信息
@@ -162,23 +174,10 @@ class Weibo(object):
             self.get_user_info()
             self.get_pages()
             # print(u'信息抓取完毕')
-            print('*' * 100)
             # if self.pic_download == 1:
             #     self.download_files('img')
             # if self.video_download == 1:
             #     self.download_files('video')
-
-            # 获取页面用户ID
-        #  browser.get('https://weibo.com/u/' + user_id + '?is_hot=1')
-
-        #    sleep(10)
-        #    html = browser.page_source
-        #    print(html)
-        #    regex = re.compile('/u/[0-9]{10}')
-        #    for each_id in regex.findall(html):
-        #        tmp = each_id[3:]
-        #       if tmp not in self.ids:
-        #          self.undo_ids.append(tmp)
 
         except Exception as e:
             print('Error: ', e)
@@ -335,17 +334,17 @@ class Weibo(object):
     def get_filepath(self, type):
         """获取结果文件路径"""
         try:
-            file_dir = os.path.split(
-                os.path.realpath(__file__)
-            )[0] + os.sep + 'weibo' + os.sep + self.user['screen_name']
-            if type == 'img' or type == 'video':
-                file_dir = file_dir + os.sep + type
+            file_dir = save_path + os.sep + 'weibo' + os.sep + self.user['screen_name']
+
             if not os.path.isdir(file_dir):
                 os.makedirs(file_dir)
+            if type == 'img' or type == 'video':
+                file_dir = file_dir + os.sep + type
             if type == 'img' or type == 'video':
                 return file_dir
             file_path = file_dir + os.sep + self.user_id + '.' + type
             return file_path
+
         except Exception as e:
             print('Error: ', e)
             traceback.print_exc()
@@ -383,8 +382,8 @@ class Weibo(object):
                 if wrote_count == 0:
                     writer.writerows([result_headers])
                 writer.writerows(result_data)
-        print(u'%d条微博写入csv文件完毕,保存路径:' % self.got_count)
-        print(self.get_filepath('csv'))
+        # print(u'%d条微博写入csv文件完毕,保存路径:' % self.got_count)
+        # print(self.get_filepath('csv'))
 
     def write_data(self, wrote_count):
         """将爬到的信息写入文件或数据库"""
@@ -398,15 +397,18 @@ class Weibo(object):
     def get_pages(self):
         """获取全部微博"""
         page_count = self.get_page_count()
-
+        print('*' * 100)
+        print("开始爬取 " + self.user['screen_name'] + '[' + self.user_id + ']' + "　的微博")
         # 如果总微博数大于50则是合法用户
-        if page_count < 5:
+        if page_count < 3:
+            print(self.user['screen_name'] + '是一个假用户， 停止爬取....')
+            print('*' * 100)
             return
         wrote_count = 0
         page1 = 0
         random_pages = random.randint(1, 5)
-        for page in tqdm(range(1, page_count + 1), desc=u"进度"):
-            print(u'第%d页' % page)
+        for page in range(1, page_count + 1):
+            # print(u'第%d页' % page)
             is_end = self.get_one_page(page)
             if is_end:
                 break
@@ -425,58 +427,69 @@ class Weibo(object):
 
         self.write_data(wrote_count)  # 将剩余不足20页的微博写入文件
         print(u'微博爬取完成，共爬取%d条微博' % self.got_count)
+        print('*' * 100)
+
+
+def run(user_id):
+    '''多线程爬取'''
+    wb = Weibo(user_id)
+    wb.start()
+
+
+def get_related_ids(source_id=[]):
+    '''获取每个微博页面中的用户id用于爬取'''
+    if len(undo_ids) > 20:
+        # 带爬取的ids列表还有大量用户
+        return
+    for one in source_id:
+        print('-' * 100)
+        print("开始获取　" + one + " 的相关id")
+        count = 0
+        browser.get('https://weibo.com/u/' + one + '?is_hot=1')
+        sleep(10)
+        html = browser.page_source
+        regex = re.compile('/u/[0-9]{10}')
+        for each_id in regex.findall(html):
+            tmp = each_id[3:]
+            if tmp not in ids and tmp not in undo_ids:
+                # print("from  " + one + " get " + tmp)
+                count += 1
+                undo_ids.append(tmp)
+        print("共获取 " + str(count))
+        print('-' * 100)
 
 
 def main():
     try:
-        # 以下是程序配置信息，可以根据自己需求修改
-        filter = 1  # 值为0表示爬取全部微博（原创微博+转发微博），值为1表示只爬取原创微博
-        since_date = '2017-09-01'  # 起始时间，即爬取发布日期从该值到现在的微博，形式为yyyy-mm-dd
-        """mongodb_write值为0代表不将结果写入MongoDB数据库,1代表写入；若要写入MongoDB数据库，
-        请先安装MongoDB数据库和pymongo，pymongo安装方法为命令行运行:pip install pymongo"""
-        mongodb_write = 0
-        """mysql_write值为0代表不将结果写入MySQL数据库,1代表写入;若要写入MySQL数据库，
-        请先安装MySQL数据库和pymysql，pymysql安装方法为命令行运行:pip install pymysql"""
-        mysql_write = 0
-        pic_download = 0  # 值为0代表不下载微博原始图片,1代表下载微博原始图片
-        video_download = 0  # 值为0代表不下载微博视频,1代表下载微博视频
+        thread_num = 5
+        get_history_ids()  # 获取已经爬取过的用户id
+        get_related_ids(source_id=[init_id])
+        while True:
+            threads = []
+            temp_ids = []
+            for i in range(thread_num):
+                undo_id = undo_ids.pop(0)
+                ids.append(undo_id)
+                if not undo_id:
+                    print("finished！！！！")
+                    return
+                t = Thread(target=run, args=(undo_id,))
+                t.start()
+                temp_ids.append(undo_id)
+                threads.append(t)
 
-        # wb = Weibo(filter, since_date, mongodb_write, mysql_write,
-        #            pic_download, video_download)
+            th = Thread(target=get_related_ids, args=(temp_ids,))
+            th.start()
 
-        # 下面是自定义MySQL数据库连接配置(可选)
-        """因为操作MySQL数据库需要用户名、密码等参数，本程序默认为:
-        mysql_config = {
-            'host': 'localhost',
-            'port': 3306,
-            'user': 'root',
-            'password': '123456',
-            'charset': 'utf8mb4'
-        }
-        大家的参数配置如果和默认值不同，可以将上面的参数值替换成自己的，
-        然后添加如下代码，使修改生效，如果你的参数和默认值相同则不需要下面的代码:
-        wb.change_mysql_config(mysql_config)"""
+            for t in threads:
+                t.join()
+            th.join()
 
-        # 下面是配置user_id_list
-        """user_id_list包含了要爬的目标微博id，可以是一个，也可以是多个，也可以从文件中读取
-        爬单个微博，user_id_list如下所示，可以改成任意合法的用户id
-        user_id_list = ['1669879400']
-        爬多个微博，user_id_list如下所示，可以改成任意合法的用户id
-        user_id_list = ['1669879400', '1729370543']
-        也可以在文件中读取user_id_list，文件中可以包含很多user_id，
-        每个user_id占一行，文件名任意，类型为txt，位置位于本程序的同目录下，
-        比如文件可以叫user_id_list.txt，读取文件中的user_id_list如下所示:
-        user_id_list = wb.get_user_list('user_id_list.txt')"""
-        # wb.undo_ids = ['1669879400']  # 初始微博
-
-        # wb.start()
-        undo_ids.append('1669879400')
-        wb = Weibo('1669879400')
-        wb.start()
     except Exception as e:
         print('Error: ', e)
         traceback.print_exc()
 
 
 if __name__ == '__main__':
+    undo_ids.append(init_id)
     main()
